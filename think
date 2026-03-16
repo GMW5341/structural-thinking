@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""사고 모음집 (Thinking Collection) - 태깅 기반 메모 관리 CLI
+"""사고 모음집 (Thinking Collection) - 구조적 유추 기반 메모 관리 CLI
 
 사용법:
-  think add "내용" --source reading --domain medical --stage raw
+  think add "내용" --source reading --domain medical --structure bottleneck
   think list
   think list --tag domain/medical
-  think list --stage hypothesis
+  think spark                    # 랜덤 메모 2개로 구조적 유추
+  think spark --mode structural  # 같은 구조, 다른 도메인끼리
+  think structures               # 사용 가능한 구조 패턴 목록
   think search "키워드"
   think tags
   think show 3
+  think evolve 3                 # 단계 승격
 
 메모는 ./notes/ 폴더에 Obsidian 호환 마크다운으로 저장됩니다.
 """
@@ -27,6 +30,20 @@ VALID_SOURCES = ["reading", "conversation", "observation", "experience"]
 VALID_DOMAINS = ["medical", "business", "tech", "life"]
 VALID_STAGES = ["raw", "pattern", "hypothesis", "validated"]
 VALID_FRAMEWORKS = ["first-principles", "analogy", "inversion", "constraint"]
+
+# 사고의 구조 패턴 - 내용(what)이 아닌 형태(how)를 포착
+STRUCTURE_PATTERNS = {
+    "bottleneck":      "보이는 문제 ≠ 진짜 병목",
+    "transfer":        "A의 변화 → B에도 적용 가능",
+    "inversion":       "반대로 하면 오히려 나음",
+    "emergence":       "단순 요소들의 조합 → 예측 못한 결과",
+    "threshold":       "양적 축적 → 질적 전환 (임계점)",
+    "feedback-loop":   "A→B→A 순환 (강화 or 약화)",
+    "constraint-flip": "제약이 오히려 장점이 됨",
+    "mismatch":        "공급과 수요의 불일치",
+    "hidden-cost":     "보이는 비용 뒤에 숨은 비용",
+    "proxy-failure":   "측정 지표 ≠ 실제 목표",
+}
 
 
 def load_index():
@@ -48,10 +65,12 @@ def make_filename(note_id, title_hint):
     return f"{note_id:04d}-{safe}.md"
 
 
-def build_frontmatter(tags, created):
+def build_frontmatter(tags, created, structure=None):
     lines = ["---"]
     lines.append(f"created: {created}")
     lines.append(f"tags: [{', '.join(tags)}]")
+    if structure:
+        lines.append(f"structure: {structure}")
     lines.append("---")
     return "\n".join(lines)
 
@@ -76,9 +95,10 @@ def cmd_add(args):
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     content_text = args.content
+    structure = getattr(args, "structure", None)
 
     filename = make_filename(note_id, content_text)
-    frontmatter = build_frontmatter(tags, now)
+    frontmatter = build_frontmatter(tags, now, structure)
 
     filepath = NOTES_DIR / filename
     filepath.write_text(f"{frontmatter}\n\n{content_text}\n", encoding="utf-8")
@@ -87,6 +107,7 @@ def cmd_add(args):
         "id": note_id,
         "file": filename,
         "tags": tags,
+        "structure": structure,
         "created": now,
         "preview": content_text[:80],
     })
@@ -95,6 +116,8 @@ def cmd_add(args):
 
     print(f"✓ #{note_id} 저장 → notes/{filename}")
     print(f"  태그: {' '.join(tags)}")
+    if structure:
+        print(f"  구조: {structure} — {STRUCTURE_PATTERNS.get(structure, '')}")
 
 
 def cmd_list(args):
@@ -174,6 +197,117 @@ def cmd_tags(args):
         print(f"  {tag:<30} ({tag_counts[tag]})")
 
 
+def cmd_structures(args):
+    """사용 가능한 구조 패턴 목록"""
+    print("  사고 구조 패턴 (--structure 옵션에 사용):\n")
+    for key, desc in STRUCTURE_PATTERNS.items():
+        print(f"    {key:<20} {desc}")
+    print()
+
+    # 현재 메모에서 구조별 통계
+    index = load_index()
+    struct_counts = {}
+    for n in index["notes"]:
+        s = n.get("structure")
+        if s:
+            struct_counts[s] = struct_counts.get(s, 0) + 1
+
+    if struct_counts:
+        print("  내 메모 구조 분포:")
+        for s in sorted(struct_counts.keys()):
+            bar = "█" * struct_counts[s]
+            print(f"    {s:<20} {bar} ({struct_counts[s]})")
+
+
+def cmd_spark(args):
+    """랜덤 메모 2개를 뽑아 구조적 유추를 시도한다.
+
+    핵심: 내용(키워드)이 아닌 구조(패턴)로 연결한다.
+    외분점 — 두 메모 안에 없는 새로운 관점을 제시한다.
+    """
+    import random
+
+    index = load_index()
+    notes = index["notes"]
+
+    if len(notes) < 2:
+        print("메모가 2개 이상 있어야 spark를 사용할 수 있습니다.")
+        return
+
+    # 구조가 같은 메모끼리 연결 (같은 패턴, 다른 도메인)
+    # 또는 완전 랜덤으로 뽑아 강제 연결
+    mode = getattr(args, "mode", "random")
+
+    if mode == "structural":
+        # 같은 구조, 다른 도메인의 메모 찾기
+        structured = [n for n in notes if n.get("structure")]
+        pairs = []
+        for i, a in enumerate(structured):
+            for b in structured[i+1:]:
+                if a.get("structure") == b.get("structure"):
+                    a_domains = [t for t in a["tags"] if t.startswith("domain/")]
+                    b_domains = [t for t in b["tags"] if t.startswith("domain/")]
+                    if a_domains != b_domains:
+                        pairs.append((a, b))
+        if pairs:
+            a, b = random.choice(pairs)
+        elif len(structured) >= 2:
+            a, b = random.sample(structured, 2)
+        else:
+            a, b = random.sample(notes, 2)
+    else:
+        a, b = random.sample(notes, 2)
+
+    # 출력
+    print("=" * 60)
+    print("  SPARK — 구조적 유추 시도")
+    print("=" * 60)
+    print()
+
+    a_struct = a.get("structure", "?")
+    b_struct = b.get("structure", "?")
+    a_struct_desc = STRUCTURE_PATTERNS.get(a_struct, "미지정")
+    b_struct_desc = STRUCTURE_PATTERNS.get(b_struct, "미지정")
+
+    print(f"  ◆ 메모 A (#{a['id']})")
+    print(f"    {a['preview']}")
+    print(f"    구조: {a_struct} — {a_struct_desc}")
+    tags_a = " ".join(f"[{t}]" for t in a["tags"])
+    print(f"    {tags_a}")
+    print()
+    print(f"  ◆ 메모 B (#{b['id']})")
+    print(f"    {b['preview']}")
+    print(f"    구조: {b_struct} — {b_struct_desc}")
+    tags_b = " ".join(f"[{t}]" for t in b["tags"])
+    print(f"    {tags_b}")
+    print()
+    print("─" * 60)
+
+    # 구조가 같으면 → 도메인 간 전이 질문
+    # 구조가 다르면 → 강제 외분점 질문
+    if a_struct == b_struct and a_struct != "?":
+        print(f"  같은 구조: [{a_struct}] — {a_struct_desc}")
+        print()
+        print("  ▶ 질문: A에서 작동하는 원리가 B의 맥락에서도 성립할까?")
+        print("  ▶ 질문: 이 구조가 깨지는 조건은 뭘까?")
+        print("  ▶ 질문: 이 구조를 알고 있는 제3의 영역은?")
+    else:
+        print("  다른 구조 — 강제 외분점 탐색")
+        print()
+        print("  ▶ 질문: A의 구조를 B에 적용하면 어떤 해석이 나올까?")
+        print(f"          (B를 '{a_struct_desc}'의 관점으로 보면?)")
+        print("  ▶ 질문: B의 구조를 A에 적용하면?")
+        print(f"          (A를 '{b_struct_desc}'의 관점으로 보면?)")
+        print("  ▶ 질문: A도 B도 아닌, 이 둘을 동시에 설명하는")
+        print("          더 상위의 구조가 있을까?")
+
+    print()
+    print("─" * 60)
+    print("  이 spark에서 떠오른 생각이 있다면:")
+    print(f"  ./think add \"내용\" --source observation --stage pattern")
+    print()
+
+
 def cmd_evolve(args):
     """메모의 단계를 승격시킨다 (raw → pattern → hypothesis → validated)"""
     index = load_index()
@@ -230,6 +364,8 @@ def main():
     p_add.add_argument("--domain", "-d", choices=VALID_DOMAINS)
     p_add.add_argument("--stage", choices=VALID_STAGES, default=None)
     p_add.add_argument("--framework", "-f", choices=VALID_FRAMEWORKS)
+    p_add.add_argument("--structure", choices=list(STRUCTURE_PATTERNS.keys()),
+                       help="사고의 구조 패턴")
 
     # list
     p_list = sub.add_parser("list", aliases=["ls"], help="메모 목록")
@@ -254,6 +390,15 @@ def main():
     p_evolve.add_argument("id", type=int, help="메모 번호")
     p_evolve.add_argument("--to", choices=VALID_STAGES, help="목표 단계")
 
+    # spark
+    p_spark = sub.add_parser("spark", help="랜덤 메모 2개로 구조적 유추 시도")
+    p_spark.add_argument("--mode", "-m", choices=["random", "structural"],
+                         default="random",
+                         help="random: 완전 랜덤, structural: 같은 구조 다른 도메인")
+
+    # structures
+    sub.add_parser("structures", help="사용 가능한 구조 패턴 목록")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -268,6 +413,8 @@ def main():
         "show": cmd_show,
         "tags": cmd_tags,
         "evolve": cmd_evolve,
+        "spark": cmd_spark,
+        "structures": cmd_structures,
     }
 
     commands[args.command](args)
