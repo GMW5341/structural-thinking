@@ -33,16 +33,25 @@ VALID_FRAMEWORKS = ["first-principles", "analogy", "inversion", "constraint"]
 
 # 사고의 구조 패턴 - 내용(what)이 아닌 형태(how)를 포착
 STRUCTURE_PATTERNS = {
-    "bottleneck":      "보이는 문제 ≠ 진짜 병목",
-    "transfer":        "A의 변화 → B에도 적용 가능",
-    "inversion":       "반대로 하면 오히려 나음",
-    "emergence":       "단순 요소들의 조합 → 예측 못한 결과",
-    "threshold":       "양적 축적 → 질적 전환 (임계점)",
-    "feedback-loop":   "A→B→A 순환 (강화 or 약화)",
-    "constraint-flip": "제약이 오히려 장점이 됨",
-    "mismatch":        "공급과 수요의 불일치",
-    "hidden-cost":     "보이는 비용 뒤에 숨은 비용",
-    "proxy-failure":   "측정 지표 ≠ 실제 목표",
+    # --- 경계와 임계 ---
+    "threshold":         "양적 축적 → 질적 전환 (임계점)",
+    "forced-structure":  "회피 임계점 초과 → 구조가 강제됨 (선택은 '막을지'가 아니라 '어떤 구조를')",
+    "boundary-pair":     "상한+하한 동시 고정 → 가능/불가능의 정확한 경계",
+    # --- 인과와 역전 ---
+    "bottleneck":        "보이는 문제 ≠ 진짜 병목",
+    "inversion":         "반대로 하면 오히려 나음",
+    "constraint-flip":   "제약이 오히려 장점이 됨",
+    "feedback-loop":     "A→B→A 순환 (강화 or 약화)",
+    # --- 불일치와 착시 ---
+    "mismatch":          "공급과 수요의 불일치",
+    "hidden-cost":       "보이는 비용 뒤에 숨은 비용",
+    "proxy-failure":     "측정 지표 ≠ 실제 목표",
+    # --- 전이와 생성 ---
+    "transfer":          "A의 변화 → B에도 적용 가능",
+    "emergence":         "단순 요소들의 조합 → 예측 못한 결과",
+    # --- 프레임 전환 ---
+    "reframe":           "가치 판단(좋다/나쁘다) → 설계 문제(가능/불가능)로 전환",
+    "level-shift":       "같은 현상을 다른 추상 층위에서 보면 다른 구조가 보임",
 }
 
 
@@ -308,6 +317,67 @@ def cmd_spark(args):
     print()
 
 
+def cmd_write(args):
+    """긴 글을 stdin이나 파일에서 읽어 메모로 저장한다."""
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+
+    index = load_index()
+    note_id = index["next_id"]
+
+    # 내용 읽기: 파일 또는 stdin
+    if args.file:
+        content_text = Path(args.file).read_text(encoding="utf-8")
+    else:
+        print("  (내용을 입력하세요. Ctrl+D로 종료)")
+        content_text = sys.stdin.read()
+
+    if not content_text.strip():
+        print("내용이 비어 있습니다.")
+        return
+
+    tags = []
+    if args.source:
+        tags.append(f"source/{args.source}")
+    if args.domain:
+        tags.append(f"domain/{args.domain}")
+    if args.stage:
+        tags.append(f"stage/{args.stage}")
+    else:
+        tags.append("stage/raw")
+    if args.framework:
+        tags.append(f"framework/{args.framework}")
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    structure = getattr(args, "structure", None)
+
+    # 제목: 첫 번째 줄 또는 --title
+    title = args.title if args.title else content_text.strip().split("\n")[0][:60]
+
+    filename = make_filename(note_id, title)
+    frontmatter = build_frontmatter(tags, now, structure)
+
+    filepath = NOTES_DIR / filename
+    filepath.write_text(f"{frontmatter}\n\n{content_text}\n", encoding="utf-8")
+
+    preview = content_text.strip().split("\n")[0][:80]
+    index["notes"].append({
+        "id": note_id,
+        "file": filename,
+        "tags": tags,
+        "structure": structure,
+        "created": now,
+        "preview": preview,
+    })
+    index["next_id"] = note_id + 1
+    save_index(index)
+
+    lines = content_text.count("\n") + 1
+    print(f"✓ #{note_id} 저장 → notes/{filename} ({lines}줄)")
+    print(f"  태그: {' '.join(tags)}")
+    if structure:
+        print(f"  구조: {structure} — {STRUCTURE_PATTERNS.get(structure, '')}")
+
+
 def cmd_evolve(args):
     """메모의 단계를 승격시킨다 (raw → pattern → hypothesis → validated)"""
     index = load_index()
@@ -385,6 +455,17 @@ def main():
     # tags
     sub.add_parser("tags", help="태그 통계")
 
+    # write (긴 글)
+    p_write = sub.add_parser("write", help="긴 글을 파일/stdin에서 읽어 메모로 저장")
+    p_write.add_argument("--title", help="메모 제목 (생략하면 첫 줄)")
+    p_write.add_argument("--file", help="읽어올 텍스트 파일 경로")
+    p_write.add_argument("--source", "-s", choices=VALID_SOURCES)
+    p_write.add_argument("--domain", "-d", choices=VALID_DOMAINS)
+    p_write.add_argument("--stage", choices=VALID_STAGES, default=None)
+    p_write.add_argument("--framework", "-f", choices=VALID_FRAMEWORKS)
+    p_write.add_argument("--structure", choices=list(STRUCTURE_PATTERNS.keys()),
+                         help="사고의 구조 패턴")
+
     # evolve
     p_evolve = sub.add_parser("evolve", help="메모 단계 승격")
     p_evolve.add_argument("id", type=int, help="메모 번호")
@@ -413,6 +494,7 @@ def main():
         "show": cmd_show,
         "tags": cmd_tags,
         "evolve": cmd_evolve,
+        "write": cmd_write,
         "spark": cmd_spark,
         "structures": cmd_structures,
     }
