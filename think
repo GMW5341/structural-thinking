@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+"""사고 모음집 (Thinking Collection) - 태깅 기반 메모 관리 CLI
+
+사용법:
+  think add "내용" --source reading --domain medical --stage raw
+  think list
+  think list --tag domain/medical
+  think list --stage hypothesis
+  think search "키워드"
+  think tags
+  think show 3
+
+메모는 ./notes/ 폴더에 Obsidian 호환 마크다운으로 저장됩니다.
+"""
+
+import argparse
+import os
+import sys
+import json
+from datetime import datetime
+from pathlib import Path
+
+NOTES_DIR = Path(__file__).parent / "notes"
+INDEX_FILE = NOTES_DIR / ".index.json"
+
+VALID_SOURCES = ["reading", "conversation", "observation", "experience"]
+VALID_DOMAINS = ["medical", "business", "tech", "life"]
+VALID_STAGES = ["raw", "pattern", "hypothesis", "validated"]
+VALID_FRAMEWORKS = ["first-principles", "analogy", "inversion", "constraint"]
+
+
+def load_index():
+    if INDEX_FILE.exists():
+        return json.loads(INDEX_FILE.read_text())
+    return {"next_id": 1, "notes": []}
+
+
+def save_index(index):
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    INDEX_FILE.write_text(json.dumps(index, ensure_ascii=False, indent=2))
+
+
+def make_filename(note_id, title_hint):
+    safe = "".join(c if c.isalnum() or c in "가-힣ㄱ-ㅎㅏ-ㅣ -_" else "_" for c in title_hint[:30])
+    safe = safe.strip("_ ")
+    if not safe:
+        safe = "note"
+    return f"{note_id:04d}-{safe}.md"
+
+
+def build_frontmatter(tags, created):
+    lines = ["---"]
+    lines.append(f"created: {created}")
+    lines.append(f"tags: [{', '.join(tags)}]")
+    lines.append("---")
+    return "\n".join(lines)
+
+
+def cmd_add(args):
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+
+    index = load_index()
+    note_id = index["next_id"]
+
+    tags = []
+    if args.source:
+        tags.append(f"source/{args.source}")
+    if args.domain:
+        tags.append(f"domain/{args.domain}")
+    if args.stage:
+        tags.append(f"stage/{args.stage}")
+    else:
+        tags.append("stage/raw")
+    if args.framework:
+        tags.append(f"framework/{args.framework}")
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    content_text = args.content
+
+    filename = make_filename(note_id, content_text)
+    frontmatter = build_frontmatter(tags, now)
+
+    filepath = NOTES_DIR / filename
+    filepath.write_text(f"{frontmatter}\n\n{content_text}\n", encoding="utf-8")
+
+    index["notes"].append({
+        "id": note_id,
+        "file": filename,
+        "tags": tags,
+        "created": now,
+        "preview": content_text[:80],
+    })
+    index["next_id"] = note_id + 1
+    save_index(index)
+
+    print(f"✓ #{note_id} 저장 → notes/{filename}")
+    print(f"  태그: {' '.join(tags)}")
+
+
+def cmd_list(args):
+    index = load_index()
+    notes = index["notes"]
+
+    if args.tag:
+        notes = [n for n in notes if any(args.tag in t for t in n["tags"])]
+    if args.stage:
+        notes = [n for n in notes if f"stage/{args.stage}" in n["tags"]]
+    if args.source:
+        notes = [n for n in notes if f"source/{args.source}" in n["tags"]]
+    if args.domain:
+        notes = [n for n in notes if f"domain/{args.domain}" in n["tags"]]
+
+    if not notes:
+        print("(메모 없음)")
+        return
+
+    for n in notes:
+        tags_str = " ".join(f"[{t}]" for t in n["tags"])
+        print(f"  #{n['id']:>3}  {n['created']}  {tags_str}")
+        print(f"       {n['preview']}")
+        print()
+
+
+def cmd_search(args):
+    index = load_index()
+    keyword = args.keyword.lower()
+    found = 0
+
+    for n in index["notes"]:
+        filepath = NOTES_DIR / n["file"]
+        if not filepath.exists():
+            continue
+        content = filepath.read_text(encoding="utf-8").lower()
+        if keyword in content:
+            tags_str = " ".join(f"[{t}]" for t in n["tags"])
+            print(f"  #{n['id']:>3}  {n['created']}  {tags_str}")
+            print(f"       {n['preview']}")
+            print()
+            found += 1
+
+    if found == 0:
+        print(f"'{args.keyword}' 검색 결과 없음")
+    else:
+        print(f"--- {found}개 발견")
+
+
+def cmd_show(args):
+    index = load_index()
+    note = next((n for n in index["notes"] if n["id"] == args.id), None)
+    if not note:
+        print(f"#{args.id} 메모를 찾을 수 없습니다")
+        return
+
+    filepath = NOTES_DIR / note["file"]
+    if not filepath.exists():
+        print(f"파일 없음: {note['file']}")
+        return
+
+    print(filepath.read_text(encoding="utf-8"))
+
+
+def cmd_tags(args):
+    index = load_index()
+    tag_counts = {}
+    for n in index["notes"]:
+        for t in n["tags"]:
+            tag_counts[t] = tag_counts.get(t, 0) + 1
+
+    if not tag_counts:
+        print("(태그 없음)")
+        return
+
+    for tag in sorted(tag_counts.keys()):
+        print(f"  {tag:<30} ({tag_counts[tag]})")
+
+
+def cmd_evolve(args):
+    """메모의 단계를 승격시킨다 (raw → pattern → hypothesis → validated)"""
+    index = load_index()
+    note = next((n for n in index["notes"] if n["id"] == args.id), None)
+    if not note:
+        print(f"#{args.id} 메모를 찾을 수 없습니다")
+        return
+
+    stage_order = VALID_STAGES
+    current = None
+    for t in note["tags"]:
+        if t.startswith("stage/"):
+            current = t.split("/")[1]
+            break
+
+    if not current:
+        current = "raw"
+
+    if args.to:
+        new_stage = args.to
+    else:
+        idx = stage_order.index(current)
+        if idx >= len(stage_order) - 1:
+            print(f"#{args.id}는 이미 최종 단계 ({current})입니다")
+            return
+        new_stage = stage_order[idx + 1]
+
+    # 인덱스 업데이트
+    note["tags"] = [t for t in note["tags"] if not t.startswith("stage/")]
+    note["tags"].append(f"stage/{new_stage}")
+
+    # 파일 업데이트
+    filepath = NOTES_DIR / note["file"]
+    if filepath.exists():
+        content = filepath.read_text(encoding="utf-8")
+        content = content.replace(f"stage/{current}", f"stage/{new_stage}")
+        filepath.write_text(content, encoding="utf-8")
+
+    save_index(index)
+    print(f"✓ #{args.id}: stage/{current} → stage/{new_stage}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="사고 모음집 - 태깅 기반 메모 관리",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    # add
+    p_add = sub.add_parser("add", help="새 메모 추가")
+    p_add.add_argument("content", help="메모 내용")
+    p_add.add_argument("--source", "-s", choices=VALID_SOURCES)
+    p_add.add_argument("--domain", "-d", choices=VALID_DOMAINS)
+    p_add.add_argument("--stage", choices=VALID_STAGES, default=None)
+    p_add.add_argument("--framework", "-f", choices=VALID_FRAMEWORKS)
+
+    # list
+    p_list = sub.add_parser("list", aliases=["ls"], help="메모 목록")
+    p_list.add_argument("--tag", "-t", help="태그 필터")
+    p_list.add_argument("--stage", choices=VALID_STAGES)
+    p_list.add_argument("--source", choices=VALID_SOURCES)
+    p_list.add_argument("--domain", choices=VALID_DOMAINS)
+
+    # search
+    p_search = sub.add_parser("search", help="키워드 검색")
+    p_search.add_argument("keyword", help="검색어")
+
+    # show
+    p_show = sub.add_parser("show", help="메모 상세 보기")
+    p_show.add_argument("id", type=int, help="메모 번호")
+
+    # tags
+    sub.add_parser("tags", help="태그 통계")
+
+    # evolve
+    p_evolve = sub.add_parser("evolve", help="메모 단계 승격")
+    p_evolve.add_argument("id", type=int, help="메모 번호")
+    p_evolve.add_argument("--to", choices=VALID_STAGES, help="목표 단계")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        return
+
+    commands = {
+        "add": cmd_add,
+        "list": cmd_list,
+        "ls": cmd_list,
+        "search": cmd_search,
+        "show": cmd_show,
+        "tags": cmd_tags,
+        "evolve": cmd_evolve,
+    }
+
+    commands[args.command](args)
+
+
+if __name__ == "__main__":
+    main()
